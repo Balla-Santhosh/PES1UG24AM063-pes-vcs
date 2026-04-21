@@ -468,8 +468,10 @@ cat .pes/index    # Human-readable text format
 ```
 
 **📸 Screenshot 3A:** Run `./pes init`, `./pes add file1.txt file2.txt`, `./pes status` — show the output.
+![3A](3a.jpeg)
 
 **📸 Screenshot 3B:** `cat .pes/index` showing the text-format index with your entries.
+![3B](3b.jpeg)
 
 ---
 
@@ -519,10 +521,13 @@ make test-integration
 ```
 
 **📸 Screenshot 4A:** Output of `./pes log` showing three commits with hashes, authors, timestamps, and messages.
+![4A](4a.jpeg)
 
 **📸 Screenshot 4B:** `find .pes -type f | sort` showing object store growth after three commits.
+![4B](4b.jpeg)
 
 **📸 Screenshot 4C:** `cat .pes/refs/heads/main` and `cat .pes/HEAD` showing the reference chain.
+![4C](4c.jpeg)
 
 ---
 
@@ -533,9 +538,45 @@ The following questions cover filesystem concepts beyond the implementation scop
 ### Branching and Checkout
 
 **Q5.1:** A branch in Git is just a file in `.git/refs/heads/` containing a commit hash. Creating a branch is creating a file. Given this, how would you implement `pes checkout <branch>` — what files need to change in `.pes/`, and what must happen to the working directory? What makes this operation complex?
+Answer:
+To implement pes checkout <branch>:
+
+1.Read the branch reference – The target branch is stored as a file under .pes/refs/heads/<branch>. The file contains a commit hash.
+
+2.Update HEAD – Write ref: refs/heads/<branch> into .pes/HEAD to point to the new branch.
+
+3.Read the target commit – Use the commit hash to obtain the root tree hash.
+
+4.Recreate the working directory – For every file in the target tree, write its content (read from the object store) to the working directory. Files that exist in the current working directory but not in the target tree must be deleted.
+
+5.Update the index – Replace the current index with the list of files from the target tree, so that the staging area reflects the new snapshot.
+
+Complexity:
+
+1.Conflicts with uncommitted changes – If the working directory contains modifications to files that differ between branches, checkout must refuse to overwrite them. Detecting this requires comparing the current working directory against both the old and new trees.
+
+2.Recursive directory handling – Creating/deleting directories and files while preserving permissions is error‑prone.
+
+3.Atomicity – If the operation fails halfway, the repository and working directory could be left in an inconsistent state.
 
 **Q5.2:** When switching branches, the working directory must be updated to match the target branch's tree. If the user has uncommitted changes to a tracked file, and that file differs between branches, checkout must refuse. Describe how you would detect this "dirty working directory" conflict using only the index and the object store.
 
+Answer:
+A dirty working directory means there are unstaged changes to tracked files. To detect conflicts:
+
+1.Load the current index – This tells us which files are staged and their expected content (hashes).
+
+2.For each file in the index – Compute its current hash (by reading the file and calling object_write(OBJ_BLOB)) and compare to the hash stored in the index.
+
+3.If the hashes differ, the file has unstaged modifications.
+
+4.For the target branch’s tree – Compare the hash of each file in the target tree with the corresponding file in the working directory (using object_write on the working file).
+
+5.If a file exists in both branches but has different content, and the working copy is dirty (hash differs from current index), then switching branches would lose changes.
+
+6.Refuse checkout if any dirty file would be overwritten by a different version from the target branch.
+
+The index acts as the “clean” baseline. The object store provides the content hashes of the target tree without needing to unpack entire blobs.
 **Q5.3:** "Detached HEAD" means HEAD contains a commit hash directly instead of a branch reference. What happens if you make commits in this state? How could a user recover those commits?
 
 ### Garbage Collection and Space Reclamation
