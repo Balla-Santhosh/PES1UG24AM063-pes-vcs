@@ -578,12 +578,81 @@ A dirty working directory means there are unstaged changes to tracked files. To 
 
 The index acts as the “clean” baseline. The object store provides the content hashes of the target tree without needing to unpack entire blobs.
 **Q5.3:** "Detached HEAD" means HEAD contains a commit hash directly instead of a branch reference. What happens if you make commits in this state? How could a user recover those commits?
+Answer:
+Detached HEAD occurs when .pes/HEAD contains a commit hash directly instead of a reference to a branch (e.g., ref: refs/heads/main). This typically happens when you check out a specific commit, tag, or a remote branch without a local branch.
+
+Making commits in detached HEAD:
+
+New commits are created normally – they have a parent (the current HEAD commit), and the commit object is written to the object store.
+However, no branch reference is updated. The only reference to the new commit is the HEAD file itself, which still contains a hash (not a branch).
+If you later switch to another branch, the HEAD file will point to that branch, and the commits made in detached HEAD become unreachable (no branch or tag points to them).
+Recovery:
+
+As long as the commit objects still exist in .pes/objects/, they can be recovered by:
+Finding the commit hash via git reflog (or in our case, by scanning object directories and parsing commit objects).
+Creating a new branch that points to that commit: echo "<hash>" > .pes/refs/heads/recovered-branch
+Updating HEAD to point to the new branch.
+The object store is append‑only, so unreachable commits remain until garbage collection runs.
 
 ### Garbage Collection and Space Reclamation
 
 **Q6.1:** Over time, the object store accumulates unreachable objects — blobs, trees, or commits that no branch points to (directly or transitively). Describe an algorithm to find and delete these objects. What data structure would you use to track "reachable" hashes efficiently? For a repository with 100,000 commits and 50 branches, estimate how many objects you'd need to visit.
 
+Answer:
+
+Algorithm (mark‑and‑sweep):
+
+Mark phase – collect all reachable objects
+
+Start from every branch reference (in .pes/refs/heads/) and from HEAD (if it points directly to a commit).
+Use a stack or queue to traverse:
+For a commit: mark it, then mark its tree and parent commit.
+For a tree: mark it, then for each entry, mark the blob (if file) or subtree (if directory).
+Keep a set (e.g., hash table) of all marked object IDs.
+Sweep phase – delete unreachable objects
+
+Iterate over all files in .pes/objects/ (sharded directories).
+For each object, compute its hash from the path. If the hash is not in the marked set, delete the file.
+Optionally remove empty shard directories.
+Data structure:
+
+A hash set (e.g., unordered_set<ObjectID> or a boolean array keyed by hash) to store reachable IDs.
+A stack/queue (list) for traversal.
+Estimate for 100,000 commits, 50 branches:
+
+Each commit points to one tree.
+Each tree may have many entries, but many trees will be shared across commits. In a typical project, the number of unique trees is roughly proportional to the number of commits.
+Assume average 2 files per commit (changes). Then objects visited ≈ commits (100k) + trees (~100k) + blobs (~200k) = ~400,000 objects.
+With 50 branches, the traversal starts from 50 tips, but the total unique objects doesn’t increase linearly because branches share history.
+The upper bound is O(commits + trees + blobs) ≈ a few hundred thousand to a million for a large repo.
+
 **Q6.2:** Why is it dangerous to run garbage collection concurrently with a commit operation? Describe a race condition where GC could delete an object that a concurrent commit is about to reference. How does Git's real GC avoid this?
+
+Answer:
+
+Danger:
+GC deletes objects that are not reachable from any reference. A concurrent commit creates new objects (blobs, trees, commit) and updates a branch reference to point to the new commit. If GC runs at the same time, it might:
+
+See the old branch pointer (before the commit updates it).
+Mark only the old commit and its objects as reachable.
+Delete the newly created objects that are not yet referenced (because the branch pointer hasn’t been updated).
+Race condition example:
+
+GC begins: reads branch main → points to commit C1.
+User commits: creates new commit C2 (and its tree and blobs), writes them to object store.
+GC continues: it does not see C2 because the branch still points to C1. GC marks only objects reachable from C1.
+GC deletes C2 and its associated objects because they are “unreachable”.
+User’s commit operation finishes and tries to update main to C2, but C2 no longer exists → repository corruption.
+How Git avoids this:
+
+Git uses temporary references and atomic reference updates with a “reachability bitmap” technique:
+
+A commit is first written to the object store, then the branch reference is updated atomically (using rename() on the ref file).
+Git’s garbage collector (git gc) operates in two modes:
+Incremental GC – it does not delete objects that are less than a certain age (e.g., 2 weeks) to avoid races with concurrent commits.
+Full GC – it uses a lock (.git/gc.pid) to ensure only one GC runs at a time, and it refuses to run if any other Git operation is in progress (e.g., by checking for index.lock).
+More advanced: Git can create temporary references (e.g., refs/heads/.tmp-<pid>) that are also marked as reachable during GC, so that in‑flight commits are protected.
+In practice, git gc is safe because it relies on the fact that reference updates are atomic and it explicitly locks the repository during the crucial mark‑and‑sweep phase.
 
 ---
 
