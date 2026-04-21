@@ -216,9 +216,33 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
     if(sscanf((char *)buf, "%15s %zu", type_str, &data_len)!=2){
 	    free(buf); return -1;
     }
+    
+    //Step4: Recompute hash and compare
+    ObjectID computed;
+    compute_hash(buf, file_size, &computed);
+    if(memcmp(computed.hash, id->hash, HASH_SIZE) !=0){
+	    free(buf); return -1;
+    }
 
+    //Step5: Map type string to ObjectType enum
+    if(strncmp(type_str, "blob",4)==0) *type_out = OBJ_BLOB;
+    else if(strncmp(type_str, "tree",4)==0) *type_out = OBJ_TREE;
+    else if(strncmp(type_str, "commit",6)==0) *type_out = OBJ_COMMIT;
+    else { free(buf); return -1;}
+
+    //Step6: Allocate and copy out the data portion after null terminator
+    uint8_t *data_start = null_pos +1;
+    size_t actual_data_len=file_size - (data_start-buf);
+
+    *len_out =data_len;
+    *data_out = malloc(data_len);
+    if(!*data_out) {free(buf); return -1;}
+    memcpy(*data_out, data_start, data_len);
+
+    free(buf);
+    return 0;
     
 
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
-}
+    //(void)id; (void)type_out; (void)data_out; (void)len_out;
+    //return -1;
+//}
