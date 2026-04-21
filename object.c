@@ -95,9 +95,71 @@ int object_exists(const ObjectID *id) {
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
     // TODO: Implement
-    (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
+    // Building type string
+    const char *type_str;
+    if(type==OBJ_BLOB) type_str="blob";
+    else if(type==OBJ_TREE) type_str="tree";
+    else if(type==OBJ_COMMIT) type_str="commit";
+    else return -1;
+
+    //Step1: Building header
+    char header[64];
+    int header_len=snprintf(header, sizeof(header), "%s %zu", type_str, len)+1;
+    // +1 for null terminator
+
+    // Allocate full object (header+data)
+    size_t total_len = header_len+len;
+    uint8_t *full_obj = malloc(total_len);
+    if(!full_obj) return -1;
+    memcpy(full_obj, header, header_len);
+    memcpy(full_obj+header_len, data,len);
+
+    //Step2: Hashing full object
+    compute_hash(full_obj, total_len, id_out);
+    
+    //Step3: Deduplication
+    if(object_exists(id_out)){
+	    free(full_obj);
+	    return 0;
+	    }
+
+    //Step4: Creating shard directory
+    char hex[HASH_HEX_SIZE +1];
+    hash_to_hex(id_out,hex);
+
+    char shard_dir[512];
+    snprintf(shard_dir, sizeof(shard_dir), "%s/tmp_XXXXXX", shard_dir);
+    int fd = mkstemp(tmp_path);
+    if(fd<0) { free(full_obj); return -1;}
+
+    //Writing full_obj to temp file
+    ssize_t written=write(fd, full_obj,total_len);
+    free(full_obj);
+    if(written !=(ssize_t)total_len) { close(fd); unlink(tmp_path); return -1;}
+
+    //Step6: fsync temp file to ensure data is on disk
+    if(fsync(fd)<0) { close(fd); unlink(tmp_path); return -1;}
+    close(fd);
+
+    //Step7: Atomic rename to final path
+    char final_path[512];
+    object_path(id_out, final_path, sizeof(final_path));
+    if (rename(tmp_path, final_path)< 0) { unlink(tmp_path); return -1;}
+
+    //Step8: fsync the shard directory to persist rename
+    int dir_fd = open(shard_dir, O_RDONLY);
+    if(dir_fd>=0) { fsync(dir_fd); close(dir_fd);}
+
+    //Step9: id_out alr set in step2
+    return 0; 
 }
+
+
+
+//    (void)type; (void)data; (void)len; (void)id_out;
+//    return -1;
+
+//}
 
 // Read an object from the store.
 //
@@ -123,6 +185,40 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
     // TODO: Implement
+
+    //Step1: Get file path
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    //Step2: Open and read entire file into memory
+    FILE *f = fopen(path, "rb");
+    if(!f) return -1;
+
+    fseek(f,0,SEEK_END);
+    long file_size=ftell(f);
+    fseek(f,0,SEEK_SET);
+    if(file_size<=0) {fclose(f); return -1;}
+
+    uint8_t *buf = malloc(file_size);
+    if(!buf) { fclose(f); return -1;}
+    if(fread(buf,1,file_size,f)!=(size_t)file_size) {
+	    free(buf); fclose(f); return -1;
+    }
+    fclose(f);
+
+    //Step3: Parse header - find null terminator separating header and data
+    uint8_t *null_pos = memchr(buf,'\0', file_size);
+    if(!null_pos) { free(buf); return -1;}
+
+    // Parse type and size from the ehader string before null terminator
+    char type_str[16];
+    size_t data_len;
+    if(sscanf((char *)buf, "%15s %zu", type_str, &data_len)!=2){
+	    free(buf); return -1;
+    }
+
+    
+
     (void)id; (void)type_out; (void)data_out; (void)len_out;
     return -1;
 }
